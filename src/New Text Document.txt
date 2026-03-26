@@ -1,0 +1,15 @@
+const BASE = "http://127.0.0.1:8000";
+
+// GET PROJECTS
+export async function getProjects() {
+  const res = await fetch(`${BASE}/projects`);
+  return res.json();
+}
+
+// ADD PROJECT
+export async function addProject(data) {
+  const q = new URLSearchParams(data).toString();
+  await fetch(`${BASE}/add_project?${q}`, {
+    method: "POST"
+  });
+}
