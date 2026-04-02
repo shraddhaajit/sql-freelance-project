@@ -97,6 +97,18 @@ export async function rejectProposal(id: number): Promise<void> {
   if (!res.ok) throw new Error('Failed to reject proposal');
 }
 
+export async function completeMilestone(milestoneId: number, contractId: number, amount: number): Promise<void> {
+  const res = await fetch(`${API_BASE_URL}/milestones/${milestoneId}/complete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contractId, amount }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || err.error || 'Failed to complete milestone');
+  }
+}
+
 export async function markPaymentPaid(id: number): Promise<void> {
   const res = await fetch(`${API_BASE_URL}/payments/${id}/pay`, { method: 'POST' });
   if (!res.ok) {

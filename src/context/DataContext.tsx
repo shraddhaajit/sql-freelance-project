@@ -158,8 +158,8 @@ function getNextId(data: any[], key: string): number {
 
 export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [data, setData] = useState(loadData);
-  const [activeClientId, setActiveClientId] = useState<number | null>(data.clients[0]?.clientId ?? null);
-  const [activeFreelancerId, setActiveFreelancerId] = useState<number | null>(data.freelancers[0]?.freelancerId ?? null);
+  const [activeClientId, setActiveClientId] = useState<number | null>(null);
+  const [activeFreelancerId, setActiveFreelancerId] = useState<number | null>(null);
   const [isApiConnected, setIsApiConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const initialLoad = useRef(true);
@@ -426,12 +426,62 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [apiOrLocal, update]);
 
   const updateMilestone = useCallback((m: Milestone) => {
-    apiOrLocal(
-      () => api.updateRecord('milestones', m.milestoneId, m),
-      () => update('milestones', prev => prev.map((x: Milestone) => x.milestoneId === m.milestoneId ? m : x)),
-      'Milestone updated',
-    );
-  }, [apiOrLocal, update]);
+    // When a milestone is marked Completed, automatically:
+    // 1. Create a pending payment request for it
+    // 2. If ALL milestones on the contract are now Completed, mark contract as Completed too
+    if (m.status === 'Completed') {
+      if (isApiConnected) {
+        (async () => {
+          try {
+            await api.updateRecord('milestones', m.milestoneId, m);
+            await api.completeMilestone(m.milestoneId, m.contractId, m.amount);
+            await refreshData();
+            toast.success('Milestone completed — payment request created');
+          } catch (err: any) {
+            toast.error(err.message || 'Failed to complete milestone');
+          }
+        })();
+      } else {
+        setData((prev: any) => {
+          const updatedMilestones = prev.milestones.map((x: Milestone) =>
+            x.milestoneId === m.milestoneId ? m : x
+          );
+          // Auto-create payment request
+          const alreadyPaid = prev.payments.some((p: Payment) => p.milestoneId === m.milestoneId);
+          const newPayments = alreadyPaid ? prev.payments : [
+            ...prev.payments,
+            {
+              paymentId: prev.payments.length > 0 ? Math.max(...prev.payments.map((p: Payment) => p.paymentId)) + 1 : 1,
+              milestoneId: m.milestoneId,
+              paymentDate: new Date().toISOString().split('T')[0],
+              amount: m.amount,
+              method: 'Bank Transfer',
+              status: 'Pending',
+            }
+          ];
+          // Auto-complete contract and project if all milestones are done
+          const contractMilestones = updatedMilestones.filter((x: Milestone) => x.contractId === m.contractId);
+          const allDone = contractMilestones.length > 0 && contractMilestones.every((x: Milestone) => x.status === 'Completed');
+          const updatedContracts = allDone
+            ? prev.contracts.map((c: Contract) => c.contractId === m.contractId ? { ...c, contractStatus: 'Completed' } : c)
+            : prev.contracts;
+          // Find the project linked to this contract and mark it Completed too
+          const contractRecord = prev.contracts.find((c: Contract) => c.contractId === m.contractId);
+          const updatedProjects = allDone && contractRecord
+            ? prev.projects.map((p: Project) => p.projectId === contractRecord.projectId ? { ...p, status: 'Completed' } : p)
+            : prev.projects;
+          return { ...prev, milestones: updatedMilestones, payments: newPayments, contracts: updatedContracts, projects: updatedProjects };
+        });
+        toast.success('Milestone completed — payment request created' + (false ? '' : ' (local)'));
+      }
+    } else {
+      apiOrLocal(
+        () => api.updateRecord('milestones', m.milestoneId, m),
+        () => update('milestones', prev => prev.map((x: Milestone) => x.milestoneId === m.milestoneId ? m : x)),
+        'Milestone updated',
+      );
+    }
+  }, [isApiConnected, refreshData, apiOrLocal, update]);
 
   const deleteMilestone = useCallback((id: number) => {
     apiOrLocal(

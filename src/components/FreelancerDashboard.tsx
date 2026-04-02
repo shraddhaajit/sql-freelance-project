@@ -7,8 +7,9 @@ import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Send, Star } from 'lucide-react';
+import { Send, Star, AlertTriangle } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { toast } from 'sonner';
 import type { ColumnDef } from '@/types';
 
 const FreelancerDashboard: React.FC = () => {
@@ -20,26 +21,30 @@ const FreelancerDashboard: React.FC = () => {
   const clientOptions = data.clients.map(c => ({ value: c.clientId, label: c.clientName }));
   const freelancerOptions = data.freelancers.map(f => ({ value: f.freelancerId, label: f.freelancerName }));
 
-  // ── Workflow-constrained derived sets ──────────────────────────────────────
+  // ── Derived sets ──────────────────────────────────────────────────────────
 
+  // Only Open/Posted projects can receive proposals
   const openProjects = data.projects.filter(p => ['Open', 'Posted'].includes(p.status));
 
-  // Projects this freelancer has already submitted a proposal for (any status)
+  // Projects this freelancer already proposed on (any status)
   const alreadyProposedProjectIds = new Set(
     data.proposals
       .filter(p => p.freelancerId === data.activeFreelancerId)
       .map(p => p.projectId)
   );
 
+  // This freelancer's contracts
   const myContracts = data.activeFreelancerId
     ? data.contracts.filter(c => c.freelancerId === data.activeFreelancerId)
     : data.contracts;
   const myContractIds = myContracts.map(c => c.contractId);
   const activeMyContracts = myContracts.filter(c => c.contractStatus === 'Active');
 
+  // Milestones under this freelancer's contracts
   const myMilestones = data.milestones.filter(m => myContractIds.includes(m.contractId));
   const myMilestoneIds = myMilestones.map(m => m.milestoneId);
-  // Only Completed milestones without an existing payment can have a new payment
+
+  // Completed milestones not yet paid
   const paidMilestoneIds = new Set(data.payments.map(p => p.milestoneId));
   const unpaidCompletedMilestones = myMilestones.filter(
     m => m.status === 'Completed' && !paidMilestoneIds.has(m.milestoneId)
@@ -56,6 +61,23 @@ const FreelancerDashboard: React.FC = () => {
     ? data.reviews.filter(r => r.freelancerId === data.activeFreelancerId)
     : data.reviews;
   const myDisputes = data.disputes.filter(d => myContractIds.includes(d.contractId));
+
+  // ── Budget warnings per contract ─────────────────────────────────────────
+  // For each active contract, sum milestone amounts and compare to project budget
+  const contractBudgetWarnings: Record<number, string> = {};
+  activeMyContracts.forEach(contract => {
+    const project = data.projects.find(p => p.projectId === contract.projectId);
+    if (!project) return;
+    const contractMilestones = data.milestones.filter(m => m.contractId === contract.contractId);
+    const totalMilestoneAmount = contractMilestones.reduce((sum, m) => sum + (m.amount || 0), 0);
+    if (totalMilestoneAmount > project.budget) {
+      contractBudgetWarnings[contract.contractId] =
+        `Total milestone amounts (₹${totalMilestoneAmount.toLocaleString()}) exceed project budget (₹${project.budget.toLocaleString()})`;
+    }
+  });
+
+  // Overall warning message for the milestone tab
+  const milestoneOverBudgetWarning = Object.values(contractBudgetWarnings)[0] ?? null;
 
   // ── Column definitions ────────────────────────────────────────────────────
 
@@ -79,16 +101,15 @@ const FreelancerDashboard: React.FC = () => {
       render: (val) => data.clients.find(c => c.clientId === Number(val))?.clientName ?? val },
     { key: 'projectTitle', label: 'Title', type: 'text' },
     { key: 'description', label: 'Description', type: 'textarea' },
-    { key: 'budget', label: 'Budget ($)', type: 'number' },
+    { key: 'budget', label: 'Budget (₹)', type: 'number' },
     { key: 'deadline', label: 'Deadline', type: 'date' },
     { key: 'status', label: 'Status', type: 'select', options: [
-      { value: 'Posted', label: 'Posted' }, { value: 'Open', label: 'Open' }, { value: 'Active', label: 'Active' },
+      { value: 'Posted', label: 'Posted' }, { value: 'Open', label: 'Open' },
       { value: 'In Progress', label: 'In Progress' }, { value: 'Completed', label: 'Completed' },
     ]},
   ];
 
-  // Proposals: freelancer can only create Pending proposals for open projects.
-  // Status field is hidden in the add form — always defaults to Pending.
+  // Proposals: status hidden from form, always Pending on create
   const proposalCols: ColumnDef[] = [
     { key: 'proposalId', label: 'ID', type: 'number', hideInForm: true },
     { key: 'projectId', label: 'Project', type: 'select',
@@ -96,10 +117,9 @@ const FreelancerDashboard: React.FC = () => {
       render: (val) => data.projects.find(p => p.projectId === Number(val))?.projectTitle ?? val },
     { key: 'freelancerId', label: 'Freelancer', type: 'select', options: freelancerOptions,
       render: (val) => data.freelancers.find(f => f.freelancerId === Number(val))?.freelancerName ?? val },
-    { key: 'proposedAmount', label: 'Amount ($)', type: 'number' },
+    { key: 'proposedAmount', label: 'Amount (₹)', type: 'number' },
     { key: 'proposedDuration', label: 'Duration (days)', type: 'number' },
     { key: 'proposalDate', label: 'Date', type: 'date' },
-    // Status shown in table but NOT in the add form — only in edit (for display)
     { key: 'status', label: 'Status', type: 'select', hideInForm: true, options: [
       { value: 'Pending', label: 'Pending' }, { value: 'Accepted', label: 'Accepted' }, { value: 'Rejected', label: 'Rejected' },
     ]},
@@ -118,13 +138,21 @@ const FreelancerDashboard: React.FC = () => {
     ]},
   ];
 
-  // Milestones: only Active contracts; label shows project name for context
+  // Milestones: active contracts only, with project name label
   const milestoneCols: ColumnDef[] = [
     { key: 'milestoneId', label: 'ID', type: 'number', hideInForm: true },
     { key: 'contractId', label: 'Contract', type: 'select',
       options: activeMyContracts.map(c => {
         const proj = data.projects.find(p => p.projectId === c.projectId);
-        return { value: c.contractId, label: `#${c.contractId} — ${proj?.projectTitle ?? ''}` };
+        const totalSoFar = data.milestones
+          .filter(m => m.contractId === c.contractId)
+          .reduce((s, m) => s + (m.amount || 0), 0);
+        const budget = proj?.budget ?? 0;
+        const over = totalSoFar > budget;
+        return {
+          value: c.contractId,
+          label: `#${c.contractId} — ${proj?.projectTitle ?? ''} (Budget: ₹${budget.toLocaleString()}${over ? ' ⚠ OVER' : ''})`,
+        };
       }),
       render: (val) => {
         const c = data.contracts.find(x => x.contractId === Number(val));
@@ -133,22 +161,20 @@ const FreelancerDashboard: React.FC = () => {
       }},
     { key: 'title', label: 'Title', type: 'text', required: true },
     { key: 'dueDate', label: 'Due Date', type: 'date' },
-    { key: 'amount', label: 'Amount ($)', type: 'number' },
+    { key: 'amount', label: 'Amount (₹)', type: 'number' },
     { key: 'status', label: 'Status', type: 'select', options: [
       { value: 'Pending', label: 'Pending' }, { value: 'In Progress', label: 'In Progress' },
       { value: 'Completed', label: 'Completed' },
     ]},
   ];
 
-  // Payments: read-only for freelancers — clients are the ones who pay.
-  // Freelancers only see their payment status.
   const paymentCols: ColumnDef[] = [
     { key: 'paymentId', label: 'ID', type: 'number', hideInForm: true },
     { key: 'milestoneId', label: 'Milestone', type: 'select',
       options: data.milestones.map(m => ({ value: m.milestoneId, label: m.title })),
       render: (val) => data.milestones.find(m => m.milestoneId === Number(val))?.title ?? val },
     { key: 'paymentDate', label: 'Date', type: 'date' },
-    { key: 'amount', label: 'Amount ($)', type: 'number' },
+    { key: 'amount', label: 'Amount (₹)', type: 'number' },
     { key: 'method', label: 'Method', type: 'select', options: [
       { value: 'Bank Transfer', label: 'Bank Transfer' }, { value: 'Net Banking', label: 'Net Banking' },
       { value: 'PayPal', label: 'PayPal' }, { value: 'Credit Card', label: 'Credit Card' }, { value: 'UPI', label: 'UPI' },
@@ -161,7 +187,8 @@ const FreelancerDashboard: React.FC = () => {
 
   const reviewCols: ColumnDef[] = [
     { key: 'reviewId', label: 'ID', type: 'number', hideInForm: true },
-    { key: 'projectId', label: 'Project', type: 'select', options: data.projects.map(p => ({ value: p.projectId, label: p.projectTitle })),
+    { key: 'projectId', label: 'Project', type: 'select',
+      options: data.projects.map(p => ({ value: p.projectId, label: p.projectTitle })),
       render: (val) => data.projects.find(p => p.projectId === Number(val))?.projectTitle ?? val },
     { key: 'freelancerId', label: 'Freelancer', type: 'select', options: freelancerOptions,
       render: (val) => data.freelancers.find(f => f.freelancerId === Number(val))?.freelancerName ?? val },
@@ -177,7 +204,6 @@ const FreelancerDashboard: React.FC = () => {
     { key: 'reviewDate', label: 'Date', type: 'date' },
   ];
 
-  // Disputes: Active contracts only, with readable label
   const disputeCols: ColumnDef[] = [
     { key: 'disputeId', label: 'ID', type: 'number', hideInForm: true },
     { key: 'contractId', label: 'Contract', type: 'select',
@@ -199,8 +225,23 @@ const FreelancerDashboard: React.FC = () => {
     { key: 'resolution', label: 'Resolution', type: 'textarea' },
   ];
 
+  // ── Proposal submit with budget validation ────────────────────────────────
+  const selectedProject = data.projects.find(p => p.projectId === proposalDialog);
+  const proposalOverBudget =
+    selectedProject && proposalForm.proposedAmount
+      ? Number(proposalForm.proposedAmount) > selectedProject.budget
+      : false;
+
   const handleSubmitProposal = () => {
     if (proposalDialog === null || !data.activeFreelancerId) return;
+    if (Number(proposalForm.proposedDuration) <= 0) {
+      toast.error('Duration must be at least 1 day');
+      return;
+    }
+    if (Number(proposalForm.proposedAmount) <= 0) {
+      toast.error('Proposed amount must be greater than 0');
+      return;
+    }
     data.addProposal({
       projectId: proposalDialog,
       freelancerId: data.activeFreelancerId,
@@ -211,6 +252,38 @@ const FreelancerDashboard: React.FC = () => {
     });
     setProposalDialog(null);
     setProposalForm({ proposedAmount: '', proposedDuration: '' });
+  };
+
+  // ── Milestone add with budget + due date validation ───────────────────────
+  const handleAddMilestone = (m: any) => {
+    // Due date must be within contract dates
+    const contract = data.contracts.find(c => c.contractId === Number(m.contractId));
+    if (contract && m.dueDate) {
+      if (contract.endDate && m.dueDate > contract.endDate.split(' ')[0]) {
+        toast.error(`Due date (${m.dueDate}) is after the contract end date (${contract.endDate.split(' ')[0]})`);
+        return;
+      }
+      if (contract.startDate && m.dueDate < contract.startDate.split(' ')[0]) {
+        toast.error(`Due date cannot be before the contract start date`);
+        return;
+      }
+    }
+    // Budget warning (allow but warn)
+    if (contract) {
+      const project = data.projects.find(p => p.projectId === contract.projectId);
+      if (project) {
+        const existingTotal = data.milestones
+          .filter(ms => ms.contractId === contract.contractId)
+          .reduce((s, ms) => s + (ms.amount || 0), 0);
+        const newTotal = existingTotal + Number(m.amount || 0);
+        if (newTotal > project.budget) {
+          toast.warning(
+            `Total milestones (₹${newTotal.toLocaleString()}) will exceed project budget (₹${project.budget.toLocaleString()}). Milestone added anyway.`
+          );
+        }
+      }
+    }
+    data.addMilestone(m);
   };
 
   const tabs = [
@@ -272,6 +345,9 @@ const FreelancerDashboard: React.FC = () => {
               {tab.value === 'proposals' && myProposals.filter(p => p.status === 'Pending').length > 0 && (
                 <Badge variant="secondary" className="ml-2 h-5 px-1.5 text-xs">{myProposals.filter(p => p.status === 'Pending').length}</Badge>
               )}
+              {tab.value === 'milestones' && milestoneOverBudgetWarning && (
+                <AlertTriangle className="ml-1 h-3.5 w-3.5 text-amber-500" />
+              )}
             </TabsTrigger>
           ))}
         </TabsList>
@@ -303,7 +379,7 @@ const FreelancerDashboard: React.FC = () => {
                     <Button size="sm" className="h-7 gap-1 text-xs"
                       onClick={() => { setProposalForm({ proposedAmount: '', proposedDuration: '' }); setProposalDialog(row.projectId); }}
                       disabled={!data.activeFreelancerId || alreadyProposed}
-                      title={alreadyProposed ? 'You already submitted a proposal for this project' : undefined}
+                      title={alreadyProposed ? 'You already proposed on this project' : undefined}
                     >
                       <Send className="h-3 w-3" />
                       {alreadyProposed ? 'Proposed' : 'Propose'}
@@ -314,7 +390,6 @@ const FreelancerDashboard: React.FC = () => {
             </TabsContent>
 
             <TabsContent value="proposals" className="mt-0">
-              {/* Status is hidden in the form — always submitted as Pending */}
               <GenericTable title="My Proposals" columns={proposalCols} data={myProposals} idKey="proposalId"
                 onAdd={p => data.addProposal({ ...p, freelancerId: data.activeFreelancerId || Number(p.freelancerId), status: 'Pending' })}
                 onDelete={id => data.deleteProposal(id)}
@@ -324,13 +399,22 @@ const FreelancerDashboard: React.FC = () => {
             </TabsContent>
 
             <TabsContent value="contracts" className="mt-0">
-              {/* Contracts are created automatically when a proposal is accepted — read-only for freelancers */}
+              {/* Contracts are auto-created on proposal accept — read-only */}
               <GenericTable title="My Contracts" columns={contractCols} data={myContracts} idKey="contractId" readOnly />
             </TabsContent>
 
             <TabsContent value="milestones" className="mt-0">
+              {/* Budget over-limit warning banner */}
+              {milestoneOverBudgetWarning && (
+                <div className="flex items-start gap-2 mb-3 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-sm">
+                  <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+                  <span>{milestoneOverBudgetWarning}</span>
+                </div>
+              )}
               <GenericTable title="Milestones" columns={milestoneCols} data={myMilestones} idKey="milestoneId"
-                onAdd={m => data.addMilestone(m)} onUpdate={m => data.updateMilestone(m)} onDelete={id => data.deleteMilestone(id)}
+                onAdd={handleAddMilestone}
+                onUpdate={m => data.updateMilestone(m)}
+                onDelete={id => data.deleteMilestone(id)}
                 readOnly={activeMyContracts.length === 0}
               />
               {activeMyContracts.length === 0 && (
@@ -339,19 +423,19 @@ const FreelancerDashboard: React.FC = () => {
             </TabsContent>
 
             <TabsContent value="payments" className="mt-0">
-              {/* Payments are made by clients — freelancers only view them */}
               <GenericTable title="My Payments" columns={paymentCols} data={myPayments} idKey="paymentId" readOnly />
               <p className="text-xs text-muted-foreground mt-2 px-1">Payments are processed by clients. You can track status here.</p>
             </TabsContent>
 
             <TabsContent value="reviews" className="mt-0">
-              {/* Reviews are written by clients — freelancers only view them */}
               <GenericTable title="My Reviews" columns={reviewCols} data={myReviews} idKey="reviewId" readOnly />
             </TabsContent>
 
             <TabsContent value="disputes" className="mt-0">
               <GenericTable title="Disputes" columns={disputeCols} data={myDisputes} idKey="disputeId"
-                onAdd={d => data.addDispute(d)} onUpdate={d => data.updateDispute(d)} onDelete={id => data.deleteDispute(id)}
+                onAdd={d => data.addDispute(d)}
+                onUpdate={d => data.updateDispute(d)}
+                onDelete={id => data.deleteDispute(id)}
                 defaultValues={{ disputeDate: new Date().toISOString().split('T')[0], status: 'Open' }}
                 readOnly={activeMyContracts.length === 0}
               />
@@ -369,25 +453,57 @@ const FreelancerDashboard: React.FC = () => {
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="font-display">
-              Submit Proposal for "{data.projects.find(p => p.projectId === proposalDialog)?.projectTitle}"
+              Submit Proposal — {selectedProject?.projectTitle}
             </DialogTitle>
           </DialogHeader>
           <div className="grid gap-4 py-4">
+            {selectedProject && (
+              <div className="rounded-lg bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
+                Project budget: <span className="font-semibold text-foreground">₹{selectedProject.budget.toLocaleString()}</span>
+                &nbsp;·&nbsp; Deadline: <span className="font-semibold text-foreground">{selectedProject.deadline?.split(' ')[0]}</span>
+              </div>
+            )}
             <div className="grid gap-2">
-              <Label>Proposed Amount ($)</Label>
-              <Input type="number" min={1} value={proposalForm.proposedAmount}
+              <Label>Proposed Amount (₹)</Label>
+              <Input
+                type="number" min={1}
+                value={proposalForm.proposedAmount}
                 onChange={e => setProposalForm(f => ({ ...f, proposedAmount: e.target.value }))}
-                placeholder={`Budget: $${data.projects.find(p => p.projectId === proposalDialog)?.budget ?? ''}`} />
+                placeholder={`e.g. ${selectedProject?.budget ?? ''}`}
+                className={proposalOverBudget ? 'border-amber-400 focus-visible:ring-amber-400' : ''}
+              />
+              {proposalOverBudget && (
+                <p className="flex items-center gap-1 text-xs text-amber-600">
+                  <AlertTriangle className="h-3 w-3" />
+                  Your amount exceeds the project budget of ₹{selectedProject?.budget.toLocaleString()}. You can still submit.
+                </p>
+              )}
             </div>
             <div className="grid gap-2">
               <Label>Duration (days)</Label>
-              <Input type="number" min={1} value={proposalForm.proposedDuration}
-                onChange={e => setProposalForm(f => ({ ...f, proposedDuration: e.target.value }))} />
+              <Input
+                type="number" min={1}
+                value={proposalForm.proposedDuration}
+                onChange={e => setProposalForm(f => ({ ...f, proposedDuration: e.target.value }))}
+                placeholder="e.g. 30"
+              />
+              {proposalForm.proposedDuration && Number(proposalForm.proposedDuration) > 0 && selectedProject?.deadline && (
+                <p className="text-xs text-muted-foreground">
+                  Estimated completion: {new Date(Date.now() + Number(proposalForm.proposedDuration) * 86400000).toISOString().split('T')[0]}
+                  {new Date(Date.now() + Number(proposalForm.proposedDuration) * 86400000).toISOString().split('T')[0] > selectedProject.deadline.split(' ')[0]
+                    ? <span className="text-amber-600 ml-1">⚠ After project deadline</span>
+                    : <span className="text-green-600 ml-1">✓ Within deadline</span>
+                  }
+                </p>
+              )}
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setProposalDialog(null)}>Cancel</Button>
-            <Button onClick={handleSubmitProposal} disabled={!proposalForm.proposedAmount || !proposalForm.proposedDuration}>
+            <Button
+              onClick={handleSubmitProposal}
+              disabled={!proposalForm.proposedAmount || !proposalForm.proposedDuration || Number(proposalForm.proposedDuration) <= 0}
+            >
               Submit Proposal
             </Button>
           </DialogFooter>
